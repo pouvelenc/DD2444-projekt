@@ -1,25 +1,20 @@
 """
 qlbm_tools.py
-Shared utilities for QLBM simulation, ZNE mitigation, and visualization.
+shared utilities for qlbm simulation, zne mitigation, and visualization.
 """
 import sys
 from types import ModuleType
 
-# --- 1. CRITICAL PATCHES (MUST BE BEFORE MITIQ IMPORT) ---
-# Mitiq issues a legacy import that fails on newer NumPy versions.
-# We must inject a fake module into sys.modules to intercept this.
+# --- critical patches (must be before mitiq import) ---
 try:
     from numpy import RankWarning
 except ImportError:
     class RankWarning(UserWarning): pass
 
-# Create a dummy module "numpy.lib.polynomial"
 poly_mod = ModuleType("numpy.lib.polynomial")
 poly_mod.RankWarning = RankWarning
-
-# Inject it so mitiq finds it immediately upon import
 sys.modules["numpy.lib.polynomial"] = poly_mod
-# ---------------------------------------------------------
+# -----------------------------------------------------
 
 import json
 import time
@@ -27,36 +22,37 @@ import numpy as np
 import imageio
 import pyvista as pv
 import matplotlib.pyplot as plt
-from os import listdir, path
-from PIL import Image, ImageDraw
+from os import listdir, path, makedirs
+from PIL import Image, ImageDraw, ImageFont
 from pyvista import themes
 
-# Now it is safe to import mitiq
 from mitiq.zne.scaling import fold_gates_at_random
-from mitiq.zne.inference import RichardsonFactory
-from qiskit_aer.noise import NoiseModel, pauli_error
+from mitiq.zne.inference import RichardsonFactory, LinearFactory
+from qiskit_aer.noise import NoiseModel, depolarizing_error, pauli_error
+# ensure fakefez is available if requested, otherwise catch error
+try:
+    from qiskit_ibm_runtime.fake_provider import FakeFez
+except ImportError:
+    FakeFez = None
 
-# Set theme globally on import
 pv.set_plot_theme(themes.ParaViewTheme())
 
+# --- backend monitoring & zne ---
 
-# --- 2. Backend Spies (ZNE & Progress) ---
 class BackendSpy:
-    """Wraps a backend to intercept job execution for progress tracking or ZNE."""
+    """intercepts backend.run for progress tracking and zne scaling."""
     def __init__(self, backend, total_steps, zne_scales=None):
         self.original_run = backend.run
         self.total_steps = total_steps
         self.scales = zne_scales if zne_scales else [1.0]
         self.is_zne = zne_scales is not None
-        self.history = []  # Stores raw counts
+        self.history = []
         self.jobs_started = 0
 
     def __call__(self, circuits, **kwargs):
-        """The function that replaces backend.run"""
-        # Handle input (QLBM sends single circuit, Qiskit expects list)
         base_circuit = circuits[0] if isinstance(circuits, list) else circuits
         
-        # Prepare circuits (Fold if ZNE)
+        # fold circuits if zne is active
         run_circuits = []
         for s in self.scales:
             if s > 1.0:
@@ -64,51 +60,42 @@ class BackendSpy:
             else:
                 run_circuits.append(base_circuit)
         
-        # Run on actual backend
         self.jobs_started += 1
-        current_step = self.jobs_started
+        print(f"step {self.jobs_started}/{self.total_steps} | submitted...", end="\r")
         
-        print(f"Step {current_step}/{self.total_steps} | Submitted...", end="\r")
         job = self.original_run(run_circuits, **kwargs)
-
-        # Wrap result to track when it actually finishes
-        return SpyJobWrapper(job, self, current_step)
+        return SpyJobWrapper(job, self, self.jobs_started)
 
 class SpyJobWrapper:
-    """Wraps the Qiskit Job to capture results and measure execution time."""
+    """wraps qiskit job to measure time and capture counts."""
     def __init__(self, real_job, spy_instance, step_idx):
         self.real_job = real_job
         self.spy = spy_instance
         self.step_idx = step_idx
 
     def result(self):
-        # Measure the specific execution time of this step
         start_time = time.time()
-        full_result = self.real_job.result() # This blocks until finished
+        full_result = self.real_job.result()
         duration = time.time() - start_time
         
-        # Print completion message
-        print(f"Step {self.step_idx}/{self.spy.total_steps} | Finished in {duration:.2f}s   ")
+        print(f"step {self.step_idx}/{self.spy.total_steps} | finished in {duration:.2f}s   ")
         
-        # Save data to history
         all_counts = full_result.get_counts()
         if not isinstance(all_counts, list): all_counts = [all_counts]
         
+        # map results to scales
         step_data = {}
         for i, s in enumerate(self.spy.scales):
             if i < len(all_counts):
                 step_data[str(s)] = all_counts[i]
         
-        # For ZNE, save the dict of scales. For normal, just save the counts.
         self.spy.history.append(step_data if self.spy.is_zne else step_data.get("1.0"))
-        
-        # Return wrapper to QLBM
         return SpyResultWrapper(full_result)
     
     def circuits(self): return self.real_job.circuits()
 
 class SpyResultWrapper:
-    """Wraps the Qiskit Result to return only the scale 1.0 counts."""
+    """wraps result to expose only scale 1.0 to qlbm logic."""
     def __init__(self, result): self._result = result
     def get_counts(self, experiment=None):
         if experiment is not None: return self._result.get_counts(experiment)
@@ -116,155 +103,166 @@ class SpyResultWrapper:
         return counts[0] if isinstance(counts, list) else counts
     def __getattr__(self, name): return getattr(self._result, name)
 
-def attach_spy(backend, steps, zne=False):
-    """Attaches the spy to the backend in-place."""
-    scales = [1.0, 3.0, 5.0] if zne else None
-    spy = BackendSpy(backend, steps, scales)
+def attach_spy(backend, steps, zne_scales=None):
+    """attaches spy in-place."""
+    spy = BackendSpy(backend, steps, zne_scales)
     backend.run = spy
     backend.spy_instance = spy 
     return backend
 
-# --- 3. Visualization (VTI & GIF) ---
+# --- visualization ---
+
 def save_vti(dense_vector, d, filename):
-    """Saves a density vector to a .vti file."""
-    grid_data = dense_vector.reshape((d[0], d[1]), order='F') # Fortran order
-    image = pv.ImageData(dimensions=(d[0], d[1], 1), spacing=(1, 1, 1), origin=(0, 0, 0))
+    grid_data = dense_vector.reshape((d, d), order='F')
+    image = pv.ImageData(dimensions=(d, d, 1), spacing=(1, 1, 1), origin=(0, 0, 0))
     image.point_data["Scalars_"] = grid_data.flatten(order='F')
     image.set_active_scalars("Scalars_")
+    if not path.exists(path.dirname(filename)):
+        makedirs(path.dirname(filename))
     image.save(filename)
 
-def create_gif(simdir, output_filename):
-    """Generates a GIF from .vti files in simdir."""
-    print(f"Generating GIF: {output_filename}...")
+def create_gif(simdir, output_filename, fps=1):
+    if not path.exists(simdir): return
     vti_files = sorted([path.join(simdir, f) for f in listdir(simdir) if f.endswith(".vti")])
     if not vti_files: return
 
-    # Find global max scalar
+    # find max scalar for consistant colorbar
     max_s = 0
     for f in vti_files:
         m = pv.read(f)
         if m.active_scalars is not None: max_s = max(max_s, m.active_scalars.max())
 
     images = []
-    sargs = dict(title="Density", title_font_size=20, label_font_size=16, 
-                 shadow=True, n_labels=3, fmt="%.1f", font_family="arial", position_x=0.2, position_y=0.05)
-
     plotter = pv.Plotter(off_screen=True)
     
-    # Load background mesh if exists
-    stl_files = [path.join(simdir, f) for f in listdir(simdir) if f.endswith(".stl")]
-    bg_mesh = pv.read(stl_files) if stl_files else None
-
     for c, vti in enumerate(vti_files):
         plotter.clear()
-        plotter.add_mesh(pv.read(vti), clim=[0, max_s], show_edges=True, scalar_bar_args=sargs)
-        if bg_mesh: plotter.add_mesh(bg_mesh, show_scalar_bar=False)
+        plotter.add_mesh(pv.read(vti), clim=[0, max_s], show_edges=True)
         plotter.view_xy()
         
         img = plotter.screenshot(transparent_background=True)
         
-        # Add progress bar
+        # draw progress bar
         pil_img = Image.fromarray(img)
         draw = ImageDraw.Draw(pil_img)
         w, h = pil_img.size
-        bar_w, bar_h = int(w * 0.8), 20
+        bar_w = int(w * 0.8)
         bx, by = (w - bar_w) // 2, h - 40
         fill = int((c + 1) / len(vti_files) * bar_w)
-        draw.rectangle([bx, by, bx + bar_w, by + bar_h], outline="black", width=3)
-        draw.rectangle([bx, by, bx + fill, by + bar_h], fill="purple")
+        draw.rectangle([bx, by, bx + bar_w, by + 20], outline="black", width=3)
+        draw.rectangle([bx, by, bx + fill, by + 20], fill="purple")
         
         images.append(np.array(pil_img))
 
     plotter.close()
-    imageio.mimsave(output_filename, images, fps=1, loop=0)
+    if not path.exists(path.dirname(output_filename)):
+        makedirs(path.dirname(output_filename))
+    imageio.mimsave(output_filename, images, fps=fps, loop=0)
+    print(f"saved gif: {output_filename}")
 
 def create_comparison_gif(dirs_dict, output_filename):
-    """
-    Creates a side-by-side GIF comparison.
-    dirs_dict: {"Ideal": path1, "Noisy": path2, "ZNE": path3}
-    """
-    print(f"Generating Comparison GIF: {output_filename}...")
-    
-    # 1. get file lists
+    """creates side-by-side gif from multiple result directories."""
     keys = list(dirs_dict.keys())
-    file_lists = {}
-    lengths = []
+    file_lists = {k: sorted([path.join(v, f) for f in listdir(v) if f.endswith(".vti")]) 
+                  for k, v in dirs_dict.items() if path.exists(v)}
     
-    global_max = 0
+    if not file_lists: return
     
-    for label, folder in dirs_dict.items():
-        files = sorted([path.join(folder, f) for f in listdir(folder) if f.endswith(".vti")])
-        file_lists[label] = files
-        lengths.append(len(files))
-        
-        # update global max scalar for consistent colorbar
-        for f in files:
-            m = pv.read(f)
-            # FORCE VALIDATION of active scalars
-            if m.active_scalars is None and m.n_arrays > 0:
-                m.set_active_scalars(m.array_names[0])
-                
-            if m.active_scalars is not None: 
-                global_max = max(global_max, m.active_scalars.max())
-
-    if not all(x == lengths[0] for x in lengths):
-        print("Warning: Simulation lengths differ. Using minimum length.")
-    
+    lengths = [len(v) for v in file_lists.values()]
     steps = min(lengths)
-    images = []
     
-    # settings
-    sargs = dict(
-        height=0.1, width=0.5, position_x=0.25, position_y=0.05,
-        title_font_size=20, label_font_size=16, fmt="%.2f", color="black"
-    )
+    # find global max for consistent coloring
+    global_max = 0
+    for flist in file_lists.values():
+        for f in flist:
+            m = pv.read(f)
+            if m.active_scalars is not None: global_max = max(global_max, m.active_scalars.max())
 
-    # 2. render frame loop
-    plotter = pv.Plotter(shape=(1, 3), off_screen=True, window_size=(1200, 500))
+    images = []
+    plotter = pv.Plotter(shape=(1, len(keys)), off_screen=True, window_size=(400 * len(keys), 500))
     
     for i in range(steps):
         plotter.clear()
-        
         for idx, label in enumerate(keys):
             plotter.subplot(0, idx)
-            vti_path = file_lists[label][i]
-            
-            mesh = pv.read(vti_path)
-            
-            # CRITICAL FIX: Re-assert active scalars immediately after read
-            if mesh.active_scalars is None and mesh.n_arrays > 0:
-                mesh.set_active_scalars(mesh.array_names[0])
-            
-            # If still None, something is wrong with the file, skip coloring
-            if mesh.active_scalars is not None:
-                plotter.add_mesh(mesh, clim=[0, global_max], scalar_bar_args=sargs)
-            else:
-                # Fallback for empty/broken meshes (shouldn't happen with valid VTI)
-                plotter.add_mesh(mesh, color="white")
-
-            plotter.add_text(label, font_size=14, color="black", position="upper_left")
+            mesh = pv.read(file_lists[label][i])
+            plotter.add_mesh(mesh, clim=[0, global_max])
+            plotter.add_text(label, font_size=12, color="black", position="upper_left")
             plotter.view_xy()
             
         img = plotter.screenshot(transparent_background=True)
-
-        # add progress bar to combined image
-        pil_img = Image.fromarray(img)
-        draw = ImageDraw.Draw(pil_img)
-        w, h = pil_img.size
-        bar_w = int(w * 0.9)
-        bx = (w - bar_w) // 2
-        by = h - 20
-        fill = int((i + 1) / steps * bar_w)
-        
-        draw.rectangle([bx, by, bx + bar_w, by + 10], outline="black", width=2)
-        draw.rectangle([bx, by, bx + fill, by + 10], fill="purple")
-        
-        images.append(np.array(pil_img))
+        images.append(np.array(Image.fromarray(img)))
         
     plotter.close()
+    if not path.exists(path.dirname(output_filename)):
+        makedirs(path.dirname(output_filename))
     imageio.mimsave(output_filename, images, fps=1, loop=0)
+    print(f"saved comparison gif: {output_filename}")
 
-# --- 4. ZNE Mitigation Logic ---
+def create_static_grid(dirs_dict, output_filename, title):
+    """creates a static summary image of all steps."""
+    keys = list(dirs_dict.keys())
+    file_lists = {k: sorted([path.join(v, f) for f in listdir(v) if f.endswith(".vti")]) 
+                  for k, v in dirs_dict.items() if path.exists(v)}
+    
+    if not file_lists: return
+
+    global_max = 0
+    for flist in file_lists.values():
+        for f in flist:
+            m = pv.read(f)
+            if m.active_scalars is not None: global_max = max(global_max, m.active_scalars.max())
+
+    cols = min(len(v) for v in file_lists.values())
+    rows = len(keys)
+    w_plot, h_plot = 240, 260
+    
+    plotter = pv.Plotter(shape=(rows, cols), off_screen=True, 
+                         window_size=(cols * w_plot, rows * h_plot), border=False)
+
+    for r, label in enumerate(keys):
+        files = file_lists[label]
+        for c in range(cols):
+            plotter.subplot(r, c)
+            mesh = pv.read(files[c])
+            plotter.add_mesh(mesh, clim=[0, global_max], show_scalar_bar=False)
+            plotter.view_xy()
+            plotter.camera.zoom(1.36)
+
+    plotter.set_background("white")
+    img_array = plotter.screenshot()
+    plotter.close()
+    
+    # add labels with pillow
+    pil_img = Image.fromarray(img_array)
+    l_margin, b_margin = 120, 100
+    final_img = Image.new("RGB", (pil_img.width + l_margin, pil_img.height + b_margin), "white")
+    final_img.paste(pil_img, (l_margin, 50))
+    
+    draw = ImageDraw.Draw(final_img)
+    try:
+        font = ImageFont.load_default()
+    except:
+        font = None
+
+    draw.text((final_img.width/2 - 200, 10), title, fill="black", font=font)
+
+    for r, label in enumerate(keys):
+        y = (r * h_plot) + (h_plot / 2) + 20
+        draw.text((20, y), label, fill="black", font=font)
+
+    for c in range(cols):
+        x = l_margin + (c * w_plot) + (w_plot / 2) - 40
+        y = pil_img.height + 50
+        draw.text((x, y), f"step {c}", fill="black", font=font)
+
+    if not path.exists(path.dirname(output_filename)):
+        makedirs(path.dirname(output_filename))
+    final_img.save(output_filename)
+    print(f"saved static grid: {output_filename}")
+
+# --- zne logic ---
+
 def counts_to_prob(counts, n_qubits):
     vec = np.zeros(2**n_qubits)
     total = sum(counts.values())
@@ -277,48 +275,49 @@ def counts_to_prob(counts, n_qubits):
 def vec_to_counts(vec, n_qubits):
     return {format(i, f'0{n_qubits}b'): val for i, val in enumerate(vec) if val > 1e-6}
 
-def process_zne_data(zne_file, d, output_json, shots=2**10):
-    """Extrapolates ZNE data and saves mitigated JSON + VTIs."""
+def process_zne_data(zne_file, d, output_json, zne_scales, shots=1024):
+    """extrapolates zne data."""
     if not path.exists(zne_file): return
     
     with open(zne_file, 'r') as f: history = json.load(f)
     
     mitigated_data = []
-    factory = RichardsonFactory([1.0, 3.0, 5.0])
+    factory = RichardsonFactory(zne_scales)
     
-    output_dir = path.dirname(output_json)
-    vti_dir = path.join(output_dir, f"ms-{d[0]}x{d[1]}-mitigated_vti")
-    if not path.exists(vti_dir): 
-        from qlbm.tools.utils import create_directory_and_parents
-        create_directory_and_parents(vti_dir)
-
-    print(f"Mitigating {len(history)} steps (scaling to {shots} shots)...")
+    out_dir = path.dirname(output_json)
+    vti_dir = path.join(out_dir, "paraview-mitigated")
+    
+    print(f"mitigating {len(history)} steps with scales {zne_scales}...")
 
     for i, step in enumerate(history):
-        c1, c3, c5 = step.get("1.0", {}), step.get("3.0", {}), step.get("5.0", {})
-        if not c1: continue
+        # check if all scales exist in step data
+        if not all(str(s) in step for s in zne_scales): continue
         
-        n_q = len(next(iter(c1)))
+        counts_list = [step[str(s)] for s in zne_scales]
+        n_q = len(next(iter(counts_list[0])))
         
+        # first step usually has no noise, just use scale 1
         if i == 0:
-            mit_vec = counts_to_prob(c1, n_q)
+            mit_vec = counts_to_prob(counts_list[0], n_q)
         else:
-            y = np.vstack([counts_to_prob(c, n_q) for c in [c1, c3, c5]])
+            y = np.vstack([counts_to_prob(c, n_q) for c in counts_list])
             mit_vec = np.zeros(2**n_q)
             active = np.where(np.sum(y, axis=0) > 0)[0]
+            
             for idx in active:
-                val = factory.extrapolate([1.0, 3.0, 5.0], y[:, idx])
+                val = factory.extrapolate(zne_scales, y[:, idx])
                 mit_vec[idx] = max(0.0, val)
 
-        mit_vec_counts = mit_vec * shots
-        
-        save_vti(mit_vec_counts, d, path.join(vti_dir, f"step_{i}.vti"))
+        # save visualization
+        mit_vec_scaled = mit_vec * shots
+        save_vti(mit_vec_scaled, d, path.join(vti_dir, f"step_{i}.vti"))
         mitigated_data.append(vec_to_counts(mit_vec, n_q))
 
     with open(output_json, 'w') as f: json.dump(mitigated_data, f)
-    create_gif(vti_dir, path.join(output_dir, "mitigated.gif"))
+    create_gif(vti_dir, path.join(out_dir, "mitigated.gif"))
 
-# --- 5. Error Metrics ---
+# --- metrics & noise ---
+
 def calculate_rmse(ideal_file, test_file, d):
     with open(ideal_file, 'r') as f: ideal = json.load(f)
     with open(test_file, 'r') as f: test = json.load(f)
@@ -326,36 +325,55 @@ def calculate_rmse(ideal_file, test_file, d):
     rmse = []
     for i in range(min(len(ideal), len(test))):
         n_q = len(next(iter(ideal[i])))
-        grid_i = counts_to_prob(ideal[i], n_q).reshape(d, order='F')
-        grid_t = counts_to_prob(test[i], n_q).reshape(d, order='F')
+        grid_i = counts_to_prob(ideal[i], n_q).reshape((d, d), order='F')
+        grid_t = counts_to_prob(test[i], n_q).reshape((d, d), order='F')
         rmse.append(np.sqrt(np.mean((grid_i - grid_t)**2)))
     return rmse
 
-def plot_errors(errors_dict):
-    plt.figure(figsize=(10, 6))
-    for name, data in errors_dict.items():
-        plt.plot(data, label=name, marker='o' if 'ZNE' not in name else 'x')
-    plt.xlabel("Step"); plt.ylabel("RMSE"); plt.legend(); plt.grid(True, alpha=0.3)
-    plt.show()
-
-# --- 6. Noise Model ---
-def custom_noise_model():
-    # Example error probabilities
-    p_reset = 0.0003
-    p_meas = 0.001
-    p_gate1 = 0.0005
-
-    # QuantumError objects
-    error_reset = pauli_error([('X', p_reset), ('I', 1 - p_reset)])
-    error_meas = pauli_error([('X',p_meas), ('I', 1 - p_meas)])
-    error_gate1 = pauli_error([('X',p_gate1), ('I', 1 - p_gate1)])
-    error_gate2 = error_gate1.tensor(error_gate1)
-
-    # Add errors to noise model
-    noise_bit_flip = NoiseModel()
-    noise_bit_flip.add_all_qubit_quantum_error(error_reset, "reset")
-    noise_bit_flip.add_all_qubit_quantum_error(error_meas, "measure")
-    noise_bit_flip.add_all_qubit_quantum_error(error_gate1, ["u1", "u2", "u3"])
-    noise_bit_flip.add_all_qubit_quantum_error(error_gate2, ["cx"])
+def plot_errors(noisy_dict, zne_dict, output_file, title, legend_title="shots"):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    fig.suptitle(title)
     
-    return noise_bit_flip
+    cmap = plt.cm.viridis
+    
+    # helper to plot a dict on an axis
+    def _plot_dict(ax, data_dict, title):
+        if not data_dict: return
+        keys = list(data_dict.keys())
+        for i, (label, data) in enumerate(data_dict.items()):
+            color = cmap(i / max(1, len(keys) - 1))
+            clean_label = label.split('-')[1] if '-' in label else label
+            inverse_label = f"1/{int(1/float(clean_label))}"
+            ax.plot(data, label=clean_label, color=color, marker='o', markersize=3)
+        ax.set_title(title)
+        ax.legend(title=legend_title)
+        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("step")
+        ax.set_ylabel("rmse")
+
+    _plot_dict(ax1, noisy_dict, "noisy baseline")
+    _plot_dict(ax2, zne_dict, "zne mitigated")
+
+    # sync y-axis limits
+    y_min = min(ax1.get_ylim()[0], ax2.get_ylim()[0])
+    y_max = max(ax1.get_ylim()[1], ax2.get_ylim()[1])
+    ax1.set_ylim(y_min, y_max)
+    ax2.set_ylim(y_min, y_max)
+    
+    plt.tight_layout()
+    plt.savefig(output_file)
+    print(f"saved error plot: {output_file}")
+
+def get_noise_model(name="depolarizing", p_err=0.001):
+    if name.lower() == "fakefez" and FakeFez:
+        return NoiseModel.from_backend(FakeFez())
+    
+    # uniform depolarizing noise
+    noise_model = NoiseModel()
+    error_1q = depolarizing_error(p_err * 0.1, 1)
+    noise_model.add_all_qubit_quantum_error(error_1q, ["u1", "u2", "u3", "rz", "sx", "x", "h"])
+    error_2q = depolarizing_error(p_err, 2)
+    noise_model.add_all_qubit_quantum_error(error_2q, ["cx", "ecr"])
+    error_meas = pauli_error([('X', 0.01), ('I', 0.99)])
+    noise_model.add_all_qubit_quantum_error(error_meas, "measure")
+    return noise_model 
