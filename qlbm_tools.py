@@ -5,7 +5,7 @@ shared utilities for qlbm simulation, zne mitigation, and visualization.
 import sys
 from types import ModuleType
 
-# --- critical patches (must be before mitiq import) ---
+# --- patches (must be before mitiq import) ---
 try:
     from numpy import RankWarning
 except ImportError:
@@ -29,7 +29,7 @@ from pyvista import themes
 from mitiq.zne.scaling import fold_gates_at_random
 from mitiq.zne.inference import RichardsonFactory, LinearFactory, ExpFactory
 from qiskit_aer.noise import NoiseModel, depolarizing_error, pauli_error
-# ensure fakefez is available if requested, otherwise catch error
+
 try:
     from qiskit_ibm_runtime.fake_provider import FakeFez
 except ImportError:
@@ -52,7 +52,6 @@ class BackendSpy:
     def __call__(self, circuits, **kwargs):
         base_circuit = circuits[0] if isinstance(circuits, list) else circuits
         
-        # fold circuits if zne is active
         run_circuits = []
         for s in self.scales:
             if s > 1.0:
@@ -83,7 +82,6 @@ class SpyJobWrapper:
         all_counts = full_result.get_counts()
         if not isinstance(all_counts, list): all_counts = [all_counts]
         
-        # map results to scales
         step_data = {}
         for i, s in enumerate(self.spy.scales):
             if i < len(all_counts):
@@ -126,7 +124,6 @@ def create_gif(simdir, output_filename, fps=1):
     vti_files = sorted([path.join(simdir, f) for f in listdir(simdir) if f.endswith(".vti")])
     if not vti_files: return
 
-    # find max scalar for consistant colorbar
     max_s = 0
     for f in vti_files:
         m = pv.read(f)
@@ -142,7 +139,6 @@ def create_gif(simdir, output_filename, fps=1):
         
         img = plotter.screenshot(transparent_background=True)
         
-        # draw progress bar
         pil_img = Image.fromarray(img)
         draw = ImageDraw.Draw(pil_img)
         w, h = pil_img.size
@@ -171,7 +167,6 @@ def create_comparison_gif(dirs_dict, output_filename):
     lengths = [len(v) for v in file_lists.values()]
     steps = min(lengths)
     
-    # find global max for consistent coloring
     global_max = 0
     for flist in file_lists.values():
         for f in flist:
@@ -290,13 +285,11 @@ def process_zne_data(zne_file, d, output_json, zne_scales, shots=1024):
     print(f"mitigating {len(history)} steps with scales {zne_scales}...")
 
     for i, step in enumerate(history):
-        # check if all scales exist in step data
         if not all(str(s) in step for s in zne_scales): continue
         
         counts_list = [step[str(s)] for s in zne_scales]
         n_q = len(next(iter(counts_list[0])))
         
-        # first step usually has no noise, just use scale 1
         if i == 0:
             mit_vec = counts_to_prob(counts_list[0], n_q)
         else:
@@ -308,7 +301,6 @@ def process_zne_data(zne_file, d, output_json, zne_scales, shots=1024):
                 val = factory.extrapolate(zne_scales, y[:, idx])
                 mit_vec[idx] = max(0.0, val)
 
-        # save visualization
         mit_vec_scaled = mit_vec * shots
         save_vti(mit_vec_scaled, d, path.join(vti_dir, f"step_{i}.vti"))
         mitigated_data.append(vec_to_counts(mit_vec, n_q))
@@ -336,7 +328,6 @@ def plot_errors(noisy_dict, zne_dict, output_file, title, legend_title="shots"):
     
     cmap = plt.cm.viridis
     
-    # helper to plot a dict on an axis
     def _plot_dict(ax, data_dict, title):
         if not data_dict: return
         keys = list(data_dict.keys())
@@ -344,7 +335,7 @@ def plot_errors(noisy_dict, zne_dict, output_file, title, legend_title="shots"):
             color = cmap(i / max(1, len(keys) - 1))
             clean_label = label.split('-')[1] if '-' in label else label
             inverse_label = f"1/{int(1/float(clean_label))}"
-            ax.plot(data, label=inverse_label, color=color, marker='o', markersize=3)
+            ax.plot(data, label=clean_label, color=color, marker='o', markersize=3)
         ax.set_title(title)
         ax.legend(title=legend_title)
         ax.grid(True, alpha=0.3)
@@ -354,7 +345,6 @@ def plot_errors(noisy_dict, zne_dict, output_file, title, legend_title="shots"):
     _plot_dict(ax1, noisy_dict, "noisy baseline")
     _plot_dict(ax2, zne_dict, "zne mitigated")
 
-    # sync y-axis limits
     y_min = min(ax1.get_ylim()[0], ax2.get_ylim()[0])
     y_max = max(ax1.get_ylim()[1], ax2.get_ylim()[1])
     ax1.set_ylim(y_min, y_max)
@@ -376,4 +366,5 @@ def get_noise_model(name="depolarizing", p_err=0.001):
     noise_model.add_all_qubit_quantum_error(error_2q, ["cx", "ecr"])
     error_meas = pauli_error([('X', 0.01), ('I', 0.99)])
     noise_model.add_all_qubit_quantum_error(error_meas, "measure")
+
     return noise_model 
