@@ -55,7 +55,7 @@ Due to specific version requirements for the `qlbm` framework and `mitiq`, pleas
     ```
 
 3.  **Outputs**:
-    Results are saved in the `sim_results/` directory, organized by geometry and configuration.
+    Results are saved in the `sim_results/` directory.
 
 ## References
 
