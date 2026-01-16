@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pyvista import themes
 
 from mitiq.zne.scaling import fold_gates_at_random
-from mitiq.zne.inference import RichardsonFactory, LinearFactory
+from mitiq.zne.inference import RichardsonFactory, LinearFactory, ExpFactory
 from qiskit_aer.noise import NoiseModel, depolarizing_error, pauli_error
 # ensure fakefez is available if requested, otherwise catch error
 try:
@@ -241,7 +241,7 @@ def create_static_grid(dirs_dict, output_filename, title):
     
     draw = ImageDraw.Draw(final_img)
     try:
-        font = ImageFont.load_default()
+        font = ImageFont.load_default(34)
     except:
         font = None
 
@@ -282,7 +282,7 @@ def process_zne_data(zne_file, d, output_json, zne_scales, shots=1024):
     with open(zne_file, 'r') as f: history = json.load(f)
     
     mitigated_data = []
-    factory = RichardsonFactory(zne_scales)
+    factory = LinearFactory(zne_scales)
     
     out_dir = path.dirname(output_json)
     vti_dir = path.join(out_dir, "paraview-mitigated")
@@ -344,7 +344,7 @@ def plot_errors(noisy_dict, zne_dict, output_file, title, legend_title="shots"):
             color = cmap(i / max(1, len(keys) - 1))
             clean_label = label.split('-')[1] if '-' in label else label
             inverse_label = f"1/{int(1/float(clean_label))}"
-            ax.plot(data, label=clean_label, color=color, marker='o', markersize=3)
+            ax.plot(data, label=inverse_label, color=color, marker='o', markersize=3)
         ax.set_title(title)
         ax.legend(title=legend_title)
         ax.grid(True, alpha=0.3)

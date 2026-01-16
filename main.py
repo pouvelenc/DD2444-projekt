@@ -11,11 +11,11 @@ import qlbm_tools as tools
 # --- configuration parameters ---
 PARAMS = {
     "d": 4,
-    "shots": [2**8, 2**10, 2**12],
+    "shots": [2**14], #[2**8, 2**10, 2**12, 2**14],
     "steps": 4,
-    "noise_model": "fakefez", # "depolarizing" or "fakefez"
+    "noise_model": "depolarizing", # "depolarizing" or "fakefez"
     "zne_scales": [1.0, 3.0, 5.0],
-    #"p_err_values": [0.0001, 0.0005, 0.001, 0.003, 0.005, 0.01]
+    #"p_err_values": [0.001]
     "p_err_values": [2**-12, 2**-11, 2**-10, 2**-9, 2**-8]
 }
 
@@ -42,12 +42,11 @@ def run_simulation(p, current_shots, mode="ideal", base_folder="results", p_err=
     if mode == "ideal":
         backend = AerSimulator(method='automatic')
     else:
-        # use provided p_err if active, otherwise use default
         noise_val = p_err if p_err is not None else 0.001
         noise_model = tools.get_noise_model(p['noise_model'], noise_val)
         backend = AerSimulator(noise_model=noise_model, method='automatic')
 
-    # attach spy (monitoring + zne folding)
+    # attach spy
     is_zne = (mode == "zne")
     scales = p['zne_scales'] if is_zne else None
     backend = tools.attach_spy(backend, p['steps'] + 1, zne_scales=scales)
@@ -95,7 +94,7 @@ def main():
     
     folder_name = f"{p['d']}x{p['d']}_steps{p['steps']}_{p['noise_model']}"
     
-    for shots in shots_list:
+    """for shots in shots_list:
         base_folder = os.path.join("sim_results", folder_name, "sweep_shots", f"shots_{shots}")
         
         file_ideal, dir_ideal = run_simulation(p, shots, "ideal", base_folder)
@@ -113,10 +112,9 @@ def main():
         all_rmse_noisy_shots[f"shots-{shots}"] = rmse_noisy
         all_rmse_zne_shots[f"shots-{shots}"] = rmse_zne
 
-        # combined visuals for this run
         vis_dirs = {"ideal": dir_ideal, "noisy": dir_noisy, "zne": dir_mitigated}
         tools.create_comparison_gif(vis_dirs, os.path.join(base_folder, "comparison.gif"))
-        tools.create_static_grid(vis_dirs, os.path.join(base_folder, "static_grid.png"), f"noise=default | {shots} shots")
+        tools.create_static_grid(vis_dirs, os.path.join(base_folder, "static_grid.png"), f"depolarizing noise | {shots} shots")"""
 
     # plot shots comparison
     summary_folder = os.path.join("sim_results", folder_name)
@@ -124,7 +122,7 @@ def main():
         all_rmse_noisy_shots, 
         all_rmse_zne_shots,
         os.path.join(summary_folder, "rmse_vs_shots.png"),
-        f"fakefez noise",
+        f"depolarizing noise",
         legend_title="shots"
     )
 
@@ -138,7 +136,6 @@ def main():
 
     base_folder_root = os.path.join("sim_results", folder_name, "sweep_perr")
     
-    # run ideal once
     file_ideal, dir_ideal = run_simulation(p, fixed_shots, "ideal", os.path.join(base_folder_root, "reference"))
 
     for p_err in p_err_list:
@@ -163,8 +160,8 @@ def main():
     tools.plot_errors(
         all_rmse_noisy_perr, 
         all_rmse_zne_perr,
-        os.path.join(summary_folder, "rmse_vs_perr_richardson.png"),
-        f"depolarizing noise  |  {fixed_shots} shots  | Richardson interpolation",
+        os.path.join(summary_folder, "rmse_vs_perr_linear.png"),
+        f"depolarizing noise  |  {fixed_shots} shots  | Linear interpolation",
         legend_title="p_err"
     )
 
