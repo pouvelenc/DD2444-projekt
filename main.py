@@ -11,11 +11,10 @@ import qlbm_tools as tools
 # --- configuration parameters ---
 PARAMS = {
     "d": 4,
-    "shots": [2**14], #[2**8, 2**10, 2**12, 2**14],
+    "shots": [2**8, 2**10, 2**12, 2**14],
     "steps": 4,
     "noise_model": "depolarizing", # "depolarizing" or "fakefez"
     "zne_scales": [1.0, 3.0, 5.0],
-    #"p_err_values": [0.001]
     "p_err_values": [2**-12, 2**-11, 2**-10, 2**-9, 2**-8]
 }
 
@@ -75,7 +74,7 @@ def run_simulation(p, current_shots, mode="ideal", base_folder="results", p_err=
     with open(raw_file, 'w') as f:
         json.dump(backend.spy_instance.history, f)
     
-    # generate standard visuals
+    # generate gif
     vti_dir = os.path.join(out_dir, "paraview")
     tools.create_gif(vti_dir, os.path.join(out_dir, "simulation.gif"))
     
@@ -94,7 +93,7 @@ def main():
     
     folder_name = f"{p['d']}x{p['d']}_steps{p['steps']}_{p['noise_model']}"
     
-    """for shots in shots_list:
+    for shots in shots_list:
         base_folder = os.path.join("sim_results", folder_name, "sweep_shots", f"shots_{shots}")
         
         file_ideal, dir_ideal = run_simulation(p, shots, "ideal", base_folder)
@@ -114,7 +113,7 @@ def main():
 
         vis_dirs = {"ideal": dir_ideal, "noisy": dir_noisy, "zne": dir_mitigated}
         tools.create_comparison_gif(vis_dirs, os.path.join(base_folder, "comparison.gif"))
-        tools.create_static_grid(vis_dirs, os.path.join(base_folder, "static_grid.png"), f"depolarizing noise | {shots} shots")"""
+        tools.create_static_grid(vis_dirs, os.path.join(base_folder, "static_grid.png"), f"depolarizing noise | {shots} shots")
 
     # plot shots comparison
     summary_folder = os.path.join("sim_results", folder_name)
@@ -166,4 +165,5 @@ def main():
     )
 
 if __name__ == "__main__":
+
     main()
