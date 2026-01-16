@@ -7,8 +7,8 @@ This repository contains a quantum lattice Boltzmann method (QLBM) simulation im
 * **`main.py`**: Configures simulation parameters (lattice size, shots, noise models) and runs simulations.
 * **`qlbm_tools.py`**: Utilities:
     * **Backend Spy**: Intercepts Qiskit jobs to perform ZNE gate folding.
-    * **Visualization**: Generates `.vti` files and visualisations (gif and png).
-    * **Analysis**: Calculates RMSE against ideal simulations and plots convergence graphs.
+    * **Visualization**: Generates visualisations (gif and png).
+    * **Analysis**: Calculates and plots RMSE against ideal simulations.
 * **`requirements.txt`**: List of Python dependencies.
 
 ## Installation
@@ -35,7 +35,7 @@ Due to specific version requirements for the `qlbm` framework and `mitiq`, pleas
 
 ## Usage
 
-1.  **Configure Parameters**:
+1.  **Parameters**:
     Open `main.py` and modify the `PARAMS` dictionary to set your simulation geometry, shot counts, and noise levels.
 
     ```python
@@ -56,9 +56,6 @@ Due to specific version requirements for the `qlbm` framework and `mitiq`, pleas
 
 3.  **Outputs**:
     Results are saved in the `sim_results/` directory, organized by geometry and configuration.
-    * `counts_*.json`: Raw simulation output.
-    * `*.gif`: Animated visualizations of the fluid flow.
-    * `rmse_*.png`: Plots comparing noisy and ZNE-mitigated results.
 
 ## References
 
